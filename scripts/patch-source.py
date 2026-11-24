@@ -196,11 +196,11 @@ def patch_wifi_defaults(openwrt: Path) -> None:
 def patch_default_theme(openwrt: Path) -> None:
     luci_light = openwrt / "feeds/luci/collections/luci-light/Makefile"
     text = require_file(luci_light)
-    if "+luci-theme-argon" not in text:
+    if "+luci-theme-vantage" not in text:
         if "+luci-theme-bootstrap" not in text:
             raise SystemExit(f"ERROR: +luci-theme-bootstrap not found in {luci_light}")
-        text = text.replace("+luci-theme-bootstrap", "+luci-theme-argon")
-        text = text.replace("default Bootstrap theme", "Argon theme")
+        text = text.replace("+luci-theme-bootstrap", "+luci-theme-vantage")
+        text = text.replace("default Bootstrap theme", "Vantage theme")
         luci_light.write_text(text, encoding="utf-8")
 
 

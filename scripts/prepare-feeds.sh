@@ -16,6 +16,10 @@ echo ">>> Updating upstream feeds..."
 
 echo ">>> Cleaning conflicting feed packages and custom directory..."
 rm -rf \
+  feeds/luci/themes/luci-theme-vantage \
+  feeds/luci/applications/luci-app-vantage \
+  feeds/luci/applications/luci-app-vantage-aps \
+  feeds/luci/applications/luci-app-vantage-traffic \
   feeds/luci/applications/luci-app-openclash \
   feeds/luci/applications/luci-app-honk \
   feeds/packages/net/honk \
@@ -28,6 +32,9 @@ rm -rf \
   package/custom
 
 mkdir -p package/custom
+
+echo ">>> Cloning anothaDev/luci-theme-vantage..."
+git clone --depth=1 -b main https://github.com/anothaDev/luci-theme-vantage.git package/custom/luci-theme-vantage
 
 echo ">>> Cloning QiuSimons/luci-app-honk..."
 git clone --depth=1 https://github.com/QiuSimons/luci-app-honk.git package/custom/luci-app-honk

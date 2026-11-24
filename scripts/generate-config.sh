@@ -56,7 +56,7 @@ fi
 
 echo ">>> Merging configuration layers for $DEVICE..."
 grep -Ev \
-  '^(# )?CONFIG_(TARGET_MULTI_PROFILE|TARGET_PER_DEVICE_ROOTFS|TARGET_DEVICE_|TARGET_BOARD|TARGET_SUBTARGET|TARGET_PROFILE|TARGET_ROOTFS_INITRAMFS|PACKAGE_luci-theme-bootstrap|PACKAGE_luci-app-eqos-mtk|PACKAGE_luci-i18n-|PACKAGE_nano|PACKAGE_tcpdump|PACKAGE_htop)' \
+  '^(# )?CONFIG_(TARGET_MULTI_PROFILE|TARGET_PER_DEVICE_ROOTFS|TARGET_DEVICE_|TARGET_BOARD|TARGET_SUBTARGET|TARGET_PROFILE|TARGET_ROOTFS_INITRAMFS|PACKAGE_luci-theme-argon|PACKAGE_luci-theme-bootstrap|PACKAGE_luci-app-eqos-mtk|PACKAGE_luci-i18n-|PACKAGE_nano|PACKAGE_tcpdump|PACKAGE_htop)' \
   "$BASE_DEFCONFIG" > .config
 
 printf '\n' >> .config
@@ -79,11 +79,11 @@ echo '# CONFIG_LUCI_LANG_zh_Hans is not set' >> .config
 
 sed -i -E 's/^(CONFIG_PACKAGE_luci-i18n-[a-zA-Z0-9_-]+-zh-cn)=(y|m)/# \1 is not set/' .config
 
-KEEP_I18N_REQUIRED="base firewall package-manager ttyd upnp mtwifi-cfg turboacc-mtk honk"
+KEEP_I18N_REQUIRED="base firewall package-manager ttyd upnp mtwifi-cfg turboacc-mtk honk vantage-theme"
 if [ "$USE_FULL" -eq 1 ]; then
   KEEP_I18N_REQUIRED="$KEEP_I18N_REQUIRED tailscale-community bandix lucky"
 fi
-KEEP_I18N_OPTIONAL="argon-config"
+KEEP_I18N_OPTIONAL="vantage vantage-aps vantage-traffic"
 
 for name in $KEEP_I18N_REQUIRED; do
   sym="CONFIG_PACKAGE_luci-i18n-${name}-zh-cn"
@@ -138,7 +138,7 @@ require_enabled CONFIG_USE_APK
 require_enabled CONFIG_KERNEL_DEBUG_INFO_BTF
 require_enabled CONFIG_PACKAGE_honk
 require_enabled CONFIG_PACKAGE_luci-app-honk
-require_enabled CONFIG_PACKAGE_luci-theme-argon
+require_enabled CONFIG_PACKAGE_luci-theme-vantage
 require_enabled CONFIG_PACKAGE_luci-app-ttyd
 require_enabled CONFIG_PACKAGE_luci-app-upnp
 require_enabled CONFIG_PACKAGE_luci-app-mtwifi-cfg
@@ -148,6 +148,8 @@ require_enabled CONFIG_PACKAGE_kmod-mt_wifi
 # 明确禁用项
 require_disabled CONFIG_CCACHE
 require_disabled CONFIG_RUBY_ENABLE_YJIT
+require_disabled CONFIG_PACKAGE_luci-theme-argon
+require_disabled CONFIG_PACKAGE_luci-theme-bootstrap
 require_disabled CONFIG_PACKAGE_dockerd
 require_disabled CONFIG_PACKAGE_luci-app-dockerman
 require_disabled CONFIG_PACKAGE_luci-app-samba4

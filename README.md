@@ -12,7 +12,7 @@
 | 主机名 | `MeekuWrt` |
 | Root 密码 | 空（直接登录，建议首次登录后自行设置） |
 | 默认 WiFi | 2.4G：`MeekuWrt` / 5G：`MeekuWrt-5G`（默认不加密） |
-| 默认主题与语言 | Argon + 简体中文（按已装插件白名单保留中文包） |
+| 默认主题与语言 | Vantage (`luci-theme-vantage`) + 简体中文（按已装插件白名单保留中文包，候选主题与切换说明见 [docs/themes.md](docs/themes.md)） |
 | 包管理器 | `apk`（25.12 新包格式，安装未签名本地包使用 `apk add --allow-untrusted <pkg>.apk`） |
 
 ---
