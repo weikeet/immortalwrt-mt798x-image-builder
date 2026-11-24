@@ -98,6 +98,15 @@ def patch_n60_pro_512m(openwrt: Path, repo: Path) -> None:
         if "netcore,n60-pro|\\" in fix_text and "netcore,n60-pro-512m" not in fix_text:
             insert_after_board_case(fix_mac, "netcore,n60-pro", "netcore,n60-pro-512m", min_matches=1)
 
+    uboot_mk = openwrt / "package/boot/uboot-mediatek/Makefile"
+    uboot_text = require_file(uboot_mk)
+    old_build_dev = "  BUILD_DEVICES:=netcore_n60-pro\n"
+    new_build_dev = "  BUILD_DEVICES:=netcore_n60-pro netcore_n60-pro-512m\n"
+    if new_build_dev not in uboot_text:
+        if old_build_dev not in uboot_text:
+            raise SystemExit(f"ERROR: '{old_build_dev.strip()}' not found in {uboot_mk}")
+        uboot_mk.write_text(uboot_text.replace(old_build_dev, new_build_dev, 1), encoding="utf-8")
+
 
 def patch_clx_s20p(openwrt: Path) -> None:
     filogic_ext = openwrt / "target/linux/mediatek/image/filogic-ext.mk"

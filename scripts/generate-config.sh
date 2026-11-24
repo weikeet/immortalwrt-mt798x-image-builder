@@ -171,4 +171,9 @@ else
   require_enabled CONFIG_PACKAGE_luci-proto-qmi
 fi
 
+if [ "$DEVICE" = "netcore-n60-pro-512m" ]; then
+  require_enabled CONFIG_PACKAGE_u-boot-mt7986_netcore_n60-pro
+  require_enabled CONFIG_PACKAGE_trusted-firmware-a-mt7986-spim-nand-ddr4
+fi
+
 echo ">>> Configuration for $DEVICE generated and verified successfully."
