@@ -250,6 +250,19 @@ def patch_build_hardening(openwrt: Path) -> None:
             )
 
 
+def patch_openclash_core_makefile(openwrt: Path) -> None:
+    """Fix double-expanded $$CORE_ARCH in OpenClash Build/Compile recipe."""
+    oc_mk = openwrt / "package/custom/luci-app-openclash/Makefile"
+    if not oc_mk.is_file():
+        return
+    text = oc_mk.read_text(encoding="utf-8")
+    # Build/Compile is evaluated twice inside OpenWrt's Build/DefaultTargets,
+    # so $$CORE_ARCH turns into ORE_ARCH unless escaped as $$$$CORE_ARCH.
+    updated = re.sub(r"(?<!\$)\$\$CORE_ARCH", "$$$$CORE_ARCH", text)
+    if updated != text:
+        oc_mk.write_text(updated, encoding="utf-8")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Apply MeekuWrt source patches.")
     parser.add_argument("--openwrt-dir", required=True, type=Path, help="Path to OpenWrt source tree")
@@ -266,6 +279,7 @@ def main() -> None:
     patch_default_theme(openwrt)
     patch_ruby_yjit(openwrt)
     patch_build_hardening(openwrt)
+    patch_openclash_core_makefile(openwrt)
 
     print("All MeekuWrt source patches applied successfully.")
 
