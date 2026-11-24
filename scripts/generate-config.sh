@@ -146,6 +146,7 @@ require_enabled CONFIG_PACKAGE_luci-app-turboacc-mtk
 require_enabled CONFIG_PACKAGE_kmod-mt_wifi
 
 # 明确禁用项
+require_disabled CONFIG_CCACHE
 require_disabled CONFIG_RUBY_ENABLE_YJIT
 require_disabled CONFIG_PACKAGE_dockerd
 require_disabled CONFIG_PACKAGE_luci-app-dockerman
