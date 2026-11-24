@@ -235,7 +235,7 @@ jobs:
           key: ${{ steps.cache-key.outputs.CACHE_KEY }}
 
       - name: Backup toolchain to Release
-        if: steps.build-toolchain.outputs.built == 'true'
+        if: steps.build-toolchain.outputs.built == 'true' || steps.cache-restore.outputs.cache-hit == 'true'
         working-directory: /workdir/openwrt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -245,8 +245,6 @@ jobs:
           CACHE_PREFIX="${{ steps.cache-key.outputs.CACHE_PREFIX }}"
           ASSET_NAME="${CACHE_KEY}.tzst"
 
-          tar -I zstdmt -cf "$ASSET_NAME" staging_dir/host* staging_dir/tool*
-
           if ! gh release view toolchain-cache --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create toolchain-cache \
               --repo "$GITHUB_REPOSITORY" \
@@ -255,10 +253,27 @@ jobs:
               --latest=false
           fi
 
-          gh release view toolchain-cache --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null \
-            | grep "^${CACHE_PREFIX}-" | grep -vx "$ASSET_NAME" | while read -r old_file; do
+          if [ "${{ steps.build-toolchain.outputs.built }}" != "true" ] && \
+             gh release view toolchain-cache --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null | grep -qx "$ASSET_NAME"; then
+            echo "Release backup already contains ${ASSET_NAME}, skipping upload."
+            exit 0
+          fi
+
+          if ! command -v zstdmt >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends zstd
+          fi
+
+          tar -I zstdmt -cf "$ASSET_NAME" staging_dir/host* staging_dir/tool*
+
+          OLD_ASSETS="$(gh release view toolchain-cache --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null \
+            | grep "^${CACHE_PREFIX}-" | grep -vx "$ASSET_NAME" || true)"
+          if [ -n "$OLD_ASSETS" ]; then
+            while IFS= read -r old_file; do
+              [ -n "$old_file" ] || continue
               gh release delete-asset toolchain-cache "$old_file" --repo "$GITHUB_REPOSITORY" -y || true
-            done
+            done <<< "$OLD_ASSETS"
+          fi
 
           gh release upload toolchain-cache "$ASSET_NAME" --repo "$GITHUB_REPOSITORY" --clobber
           rm -f "$ASSET_NAME"
