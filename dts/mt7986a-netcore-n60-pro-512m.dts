@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+
+/dts-v1/;
+#include "../dts/mt7986a-netcore-n60-pro.dts"
+
+/ {
+	model = "Netcore N60 Pro (2G/512M)";
+	compatible = "netcore,n60-pro-512m", "netcore,n60-pro", "mediatek,mt7986a";
+
+	memory@40000000 {
+		reg = <0 0x40000000 0 0x80000000>;
+		device_type = "memory";
+	};
+};
+
+&spi0 {
+	flash@0 {
+		partitions {
+			partition@580000 {
+				reg = <0x0580000 0x1fa80000>;
+			};
+		};
+	};
+};

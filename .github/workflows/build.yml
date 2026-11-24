@@ -1,0 +1,525 @@
+name: Build MeekuWrt 25.12 MT798x
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: '选择要编译的设备'
+        required: true
+        type: choice
+        default: 'all'
+        options:
+          - 'all'
+          - 'cudy-tr3000-112m'
+          - 'rax3000m-emmc'
+          - 'netcore-n60-pro-512m'
+          - 'clx-s20p'
+      publish_release:
+        description: '编译完成后按设备发布 GitHub Release（每设备保留最新 5 版）'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  TZ: Asia/Shanghai
+  REPO_URL: https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git
+  REPO_BRANCH: '25.12'
+
+jobs:
+  resolve-matrix:
+    name: Resolve Matrix & Source Commit
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+    steps:
+      - name: Resolve target devices and latest upstream commit
+        id: resolve
+        env:
+          INPUT_DEVICE: ${{ github.event.inputs.device }}
+        run: |
+          set -euo pipefail
+          if [ "$INPUT_DEVICE" = "all" ]; then
+            MATRIX='["cudy-tr3000-112m","rax3000m-emmc","netcore-n60-pro-512m","clx-s20p"]'
+          else
+            MATRIX="[\"${INPUT_DEVICE}\"]"
+          fi
+
+          SOURCE_SHA="$(git ls-remote "$REPO_URL" "refs/heads/${REPO_BRANCH}" | awk '{print $1}' | head -n 1)"
+          if [ -z "$SOURCE_SHA" ]; then
+            echo "ERROR: failed to resolve SHA for ${REPO_URL} refs/heads/${REPO_BRANCH}" >&2
+            exit 1
+          fi
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "Target matrix: $MATRIX"
+          echo "Upstream commit: $SOURCE_SHA"
+
+  prepare-honk:
+    name: Prepare honk-core (aarch64)
+    runs-on: ubuntu-24.04
+    outputs:
+      honk_src_version: ${{ steps.meta.outputs.honk_src_version }}
+    steps:
+      - name: Clone luci-app-honk & resolve pins
+        id: meta
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/QiuSimons/luci-app-honk.git "$GITHUB_WORKSPACE/luci-app-honk"
+          eval "$("$GITHUB_WORKSPACE/luci-app-honk/honk/honk_toolchain.sh")"
+          {
+            echo "honk_src_version=$HONK_SRC_VERSION"
+            echo "bpf_linker_version=$BPF_LINKER_VERSION"
+            echo "bpf_linker_sha256=$BPF_LINKER_SHA256"
+            echo "zig_version=$ZIG_VERSION"
+          } >> "$GITHUB_OUTPUT"
+          echo "HONK_SRC_VERSION=$HONK_SRC_VERSION"
+
+      - name: Restore honk-core cache
+        id: honk-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: honk-out
+          key: honk-core-aarch64-${{ steps.meta.outputs.honk_src_version }}
+
+      - name: Build honk-core when cache misses
+        if: steps.honk-cache.outputs.cache-hit != 'true'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          BPF_LINKER_VERSION: ${{ steps.meta.outputs.bpf_linker_version }}
+          BPF_LINKER_SHA256: ${{ steps.meta.outputs.bpf_linker_sha256 }}
+          ZIG_VERSION: ${{ steps.meta.outputs.zig_version }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libbpf-dev cmake libclang-dev zstd \
+            make perl file binutils git curl xz-utils pkg-config ca-certificates
+
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
+          . "$HOME/.cargo/env"
+
+          curl -fsSL -o /tmp/bpf-linker.tar.zst \
+            "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          echo "${BPF_LINKER_SHA256}  /tmp/bpf-linker.tar.zst" | sha256sum -c -
+          sudo tar --zstd -xf /tmp/bpf-linker.tar.zst -C /usr/local/bin
+
+          curl -fsSL -o /tmp/zig.tar.xz \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          sudo tar -xJf /tmp/zig.tar.xz -C /usr/local
+          sudo ln -sf "/usr/local/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
+
+          mkdir -p honk-out
+          cd "$GITHUB_WORKSPACE/luci-app-honk"
+          ./honk/build_honk_core.sh aarch64 "$GITHUB_WORKSPACE/honk-out/honk-core.bin"
+
+      - name: Save honk-core cache
+        if: steps.honk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: honk-out
+          key: honk-core-aarch64-${{ steps.meta.outputs.honk_src_version }}
+
+      - name: Upload honk-core artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: honk-core-aarch64
+          path: honk-out/honk-core.bin
+          if-no-files-found: error
+          retention-days: 1
+
+  prepare-toolchain:
+    name: Prepare Filogic Toolchain
+    needs: resolve-matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      cache_key: ${{ steps.cache-key.outputs.CACHE_KEY }}
+    steps:
+      - name: Initialize workspace & clone pinned upstream commit
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /workdir
+          sudo chown "$USER":"$USER" /workdir
+          git init -q /workdir/openwrt
+          git -C /workdir/openwrt remote add origin "$REPO_URL"
+          git -C /workdir/openwrt fetch --depth 1 origin "${{ needs.resolve-matrix.outputs.source_sha }}"
+          git -C /workdir/openwrt checkout -q FETCH_HEAD
+
+      - name: Compute toolchain cache key
+        id: cache-key
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          TOOLS_HASH="$(find tools toolchain -type f \( -name "Makefile" -o -name "*.mk" \) \
+            -exec md5sum {} + 2>/dev/null | sort | md5sum | cut -d' ' -f1)"
+          CACHE_PREFIX="toolchain-mediatek-filogic"
+          CACHE_KEY="${CACHE_PREFIX}-${TOOLS_HASH:0:16}"
+          echo "CACHE_KEY=$CACHE_KEY" >> "$GITHUB_OUTPUT"
+          echo "CACHE_PREFIX=$CACHE_PREFIX" >> "$GITHUB_OUTPUT"
+          echo "Toolchain cache key: $CACHE_KEY"
+
+      - name: Restore toolchain from actions/cache
+        id: cache-restore
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /workdir/openwrt/staging_dir/host*
+            /workdir/openwrt/staging_dir/tool*
+          key: ${{ steps.cache-key.outputs.CACHE_KEY }}
+
+      - name: Restore toolchain from Release backup
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        id: release-restore
+        continue-on-error: true
+        working-directory: /workdir/openwrt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ASSET_NAME="${{ steps.cache-key.outputs.CACHE_KEY }}.tzst"
+          if ! gh release view toolchain-cache --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if gh release view toolchain-cache --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep -qx "$ASSET_NAME"; then
+            gh release download toolchain-cache --repo "$GITHUB_REPOSITORY" -p "$ASSET_NAME" -D .
+            tar -I unzstd -xf "$ASSET_NAME"
+            rm -f "$ASSET_NAME"
+            echo "restored=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build tools and toolchain when all caches miss
+        id: build-toolchain
+        if: steps.cache-restore.outputs.cache-hit != 'true' && steps.release-restore.outputs.restored != 'true'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/lib/jvm
+          sudo docker image prune --all --force || true
+
+          sudo -E apt-get -yqq purge firefox snapd || true
+          sudo -E apt-get -yqq update
+          sudo -E apt-get -yqq install clang llvm dwarves build-essential \
+            libssl-dev libelf-dev bc flex bison python3 xz-utils tar zstd
+          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          sudo -E apt-get -yqq clean
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          cp defconfig/mt7981-ax3000.config .config
+          make defconfig
+
+          make tools/install -j"$(nproc)" || make tools/install -j1 V=s
+          make toolchain/install -j"$(nproc)" || make toolchain/install -j1 V=s
+          echo "built=true" >> "$GITHUB_OUTPUT"
+
+      - name: Save toolchain to actions/cache
+        if: steps.cache-restore.outputs.cache-hit != 'true' && (steps.release-restore.outputs.restored == 'true' || steps.build-toolchain.outputs.built == 'true')
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            /workdir/openwrt/staging_dir/host*
+            /workdir/openwrt/staging_dir/tool*
+          key: ${{ steps.cache-key.outputs.CACHE_KEY }}
+
+      - name: Backup toolchain to Release
+        if: steps.build-toolchain.outputs.built == 'true'
+        working-directory: /workdir/openwrt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          CACHE_KEY="${{ steps.cache-key.outputs.CACHE_KEY }}"
+          CACHE_PREFIX="${{ steps.cache-key.outputs.CACHE_PREFIX }}"
+          ASSET_NAME="${CACHE_KEY}.tzst"
+
+          tar -I zstdmt -cf "$ASSET_NAME" staging_dir/host* staging_dir/tool*
+
+          if ! gh release view toolchain-cache --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create toolchain-cache \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Toolchain Cache" \
+              --notes "自动生成的 Filogic 工具链缓存，请勿手动删除" \
+              --latest=false
+          fi
+
+          gh release view toolchain-cache --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null \
+            | grep "^${CACHE_PREFIX}-" | grep -vx "$ASSET_NAME" | while read -r old_file; do
+              gh release delete-asset toolchain-cache "$old_file" --repo "$GITHUB_REPOSITORY" -y || true
+            done
+
+          gh release upload toolchain-cache "$ASSET_NAME" --repo "$GITHUB_REPOSITORY" --clobber
+          rm -f "$ASSET_NAME"
+
+  build:
+    name: Build (${{ matrix.device }})
+    needs: [resolve-matrix, prepare-honk, prepare-toolchain]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJson(needs.resolve-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Free disk space & install build environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/lib/jvm
+          sudo docker image prune --all --force || true
+
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 12G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+
+          sudo -E apt-get -yqq purge firefox snapd || true
+          sudo -E apt-get -yqq update
+          sudo -E apt-get -yqq install clang llvm dwarves build-essential \
+            libssl-dev libelf-dev bc flex bison python3 xz-utils tar dos2unix zstd
+          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          sudo -E apt-get -yqq autoremove --purge
+          sudo -E apt-get -yqq clean
+          sudo -E timedatectl set-timezone "$TZ"
+
+          sudo mkdir -p /workdir
+          sudo chown "$USER":"$USER" /workdir
+
+      - name: Download prebuilt honk-core
+        uses: actions/download-artifact@v5
+        with:
+          name: honk-core-aarch64
+          path: honk-artifact
+
+      - name: Clone ImmortalWrt source (pinned commit)
+        run: |
+          set -euo pipefail
+          git init -q /workdir/openwrt
+          git -C /workdir/openwrt remote add origin "$REPO_URL"
+          git -C /workdir/openwrt fetch --depth 1 origin "${{ needs.resolve-matrix.outputs.source_sha }}"
+          git -C /workdir/openwrt checkout -q FETCH_HEAD
+
+      - name: Prepare feeds & third-party packages
+        run: |
+          chmod +x scripts/*.sh scripts/*.py files/etc/uci-defaults/*
+          ./scripts/prepare-feeds.sh /workdir/openwrt "$GITHUB_WORKSPACE/honk-artifact/honk-core.bin"
+
+      - name: Apply MeekuWrt source patches
+        run: |
+          python3 scripts/patch-source.py \
+            --openwrt-dir /workdir/openwrt \
+            --repo-dir "$GITHUB_WORKSPACE"
+
+      - name: Generate & validate device config
+        run: |
+          ./scripts/generate-config.sh "${{ matrix.device }}" /workdir/openwrt "$GITHUB_WORKSPACE"
+
+      - name: Restore toolchain from actions/cache
+        id: cache-restore
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /workdir/openwrt/staging_dir/host*
+            /workdir/openwrt/staging_dir/tool*
+          key: ${{ needs.prepare-toolchain.outputs.cache_key }}
+
+      - name: Fallback restore toolchain from Release
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        working-directory: /workdir/openwrt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ASSET_NAME="${{ needs.prepare-toolchain.outputs.cache_key }}.tzst"
+          gh release download toolchain-cache --repo "$GITHUB_REPOSITORY" -p "$ASSET_NAME" -D .
+          tar -I unzstd -xf "$ASSET_NAME"
+          rm -f "$ASSET_NAME"
+
+      - name: Skip toolchain rebuild in top Makefile
+        working-directory: /workdir/openwrt
+        run: |
+          sed -i 's/ $(tool.*\/stamp-compile)//' Makefile
+
+      - name: Restore source downloads cache
+        id: dl-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: /workdir/openwrt/dl
+          key: dl-${{ matrix.device }}-${{ hashFiles('configs/**', 'scripts/**') }}
+          restore-keys: |
+            dl-${{ matrix.device }}-
+            dl-
+
+      - name: Download package sources
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          make download -j8 || make download -j1 V=s
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Save source downloads cache
+        if: steps.dl-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: /workdir/openwrt/dl
+          key: ${{ steps.dl-cache.outputs.cache-primary-key }}
+
+      - name: Setup Rust toolchain for luci-app-fm350
+        if: matrix.device == 'cudy-tr3000-112m'
+        id: rust-fm350
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path
+          fi
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add aarch64-unknown-linux-musl
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          LOCK_HASH="$(sha256sum /workdir/openwrt/package/custom/luci-app-fm350/rust/Cargo.lock | cut -c1-16)"
+          echo "cargo_lock_hash=${LOCK_HASH}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Cargo dependencies for luci-app-fm350
+        if: matrix.device == 'cudy-tr3000-112m'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-fm350-cudy-tr3000-112m-${{ steps.rust-fm350.outputs.cargo_lock_hash }}
+          restore-keys: |
+            cargo-fm350-cudy-tr3000-112m-
+
+      - name: Compile firmware
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          echo "Building ${{ matrix.device }} using $(nproc) threads..."
+          if ! make -j"$(nproc)"; then
+            echo "Parallel build failed, retrying with 4 jobs..."
+            if ! make -j4 V=s; then
+              echo "Retrying single-threaded..."
+              make -j1 V=s
+            fi
+          fi
+
+      - name: Collect build artifacts
+        id: collect
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/out"
+          TARGET_DIR="bin/targets/mediatek/filogic"
+          mkdir -p "$OUT"
+
+          case "${{ matrix.device }}" in
+            cudy-tr3000-112m) PROFILE="cudy_tr3000-v1-mtkuboot" ;;
+            rax3000m-emmc) PROFILE="cmcc_rax3000m" ;;
+            netcore-n60-pro-512m) PROFILE="netcore_n60-pro-512m" ;;
+            clx-s20p) PROFILE="clx_s20p" ;;
+            *) echo "ERROR: unknown device" >&2; exit 1 ;;
+          esac
+
+          shopt -s nullglob
+          for f in "$TARGET_DIR"/*"${PROFILE}"*; do
+            [ -f "$f" ] || continue
+            if [ "${{ matrix.device }}" = "rax3000m-emmc" ] && [[ "$(basename "$f")" == *-nand-* ]]; then
+              continue
+            fi
+            cp -f "$f" "$OUT/"
+          done
+          for f in "$TARGET_DIR"/*.manifest "$TARGET_DIR"/profiles.json; do
+            [ -f "$f" ] && cp -f "$f" "$OUT/"
+          done
+          cp -f .config "$OUT/build.config"
+
+          if ! find "$OUT" -maxdepth 1 -type f \( -name '*sysupgrade*' -o -name '*.itb' -o -name '*.bin' \) | grep -q .; then
+            echo "ERROR: no firmware image produced for $PROFILE" >&2
+            ls -la "$TARGET_DIR"
+            exit 1
+          fi
+
+          (
+            cd "$OUT"
+            sha256sum ./* > SHA256SUMS
+          )
+
+          TIMESTAMP="$(date +'%Y%m%d-%H%M')"
+          echo "timestamp=$TIMESTAMP" >> "$GITHUB_OUTPUT"
+          echo "profile=$PROFILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: MeekuWrt-${{ matrix.device }}-${{ steps.collect.outputs.timestamp }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish GitHub Release & prune old releases
+        if: github.event.inputs.publish_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DEV="${{ matrix.device }}"
+          TAG="${DEV}-${{ steps.collect.outputs.timestamp }}"
+          SHA="${{ needs.resolve-matrix.outputs.source_sha }}"
+
+          case "$DEV" in
+            cudy-tr3000-112m)
+              LAYOUT_NOTE="Cudy TR3000 112M 三分区 DHCP U-Boot (NMBM) — 内置 \`luci-app-fm350\` (FM350-GL 5G 模组管理)，使用 \`*sysupgrade.bin\`"
+              ;;
+            rax3000m-emmc)
+              LAYOUT_NOTE="RAX3000M eMMC 官方 25.12 统一布局 — 从旧布局切换需先刷 \`emmc-gpt.bin\` / \`emmc-preloader.bin\` / \`emmc-bl31-uboot.fip\`，再用 \`*recovery.itb\` 刷入 \`*sysupgrade.itb\`"
+              ;;
+            netcore-n60-pro-512m)
+              LAYOUT_NOTE="Netcore N60 Pro 2G/512M 硬改无 NMBM 布局 — 推荐 U-Boot2025-WildEdition (移除 NMBM) + 506.5M 全量 UBI，使用 \`*sysupgrade.itb\`"
+              ;;
+            clx-s20p)
+              LAYOUT_NOTE="CLX-S20P eMMC 布局（兼容 supergateway,s20p）— 使用 \`*sysupgrade.bin\`"
+              ;;
+          esac
+
+          {
+            echo "## MeekuWrt 25.12 (${DEV})"
+            echo ""
+            echo "- **源码仓库**: ${REPO_URL} (\`${REPO_BRANCH}\` @ \`${SHA:0:12}\`)"
+            echo "- **设备布局**: ${LAYOUT_NOTE}"
+            echo "- **默认地址**: \`192.168.6.1\` | **主机名**: \`MeekuWrt\` | **密码**: 空"
+            echo "- **默认 WiFi**: \`MeekuWrt\` (2.4G) / \`MeekuWrt-5G\` (5G)，默认不加密"
+            echo ""
+            echo "### SHA256SUMS"
+            echo '```'
+            cat out/SHA256SUMS
+            echo '```'
+          } > release_notes.md
+
+          gh release create "$TAG" out/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes-file release_notes.md
+
+          ./scripts/release-cleanup.sh "$DEV" 5

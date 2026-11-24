@@ -1,0 +1,76 @@
+# Local reference repositories
+references/
+
+# OS generated files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editors and IDEs
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+key-build*
+
+# Local build, cache, and output directories
+build/
+out/
+output/
+dist/
+artifacts/
+work/
+cache/
+.cache/
+tmp/
+logs/
+
+# OpenWrt / ImmortalWrt source & ImageBuilder directories
+openwrt/
+immortalwrt/
+*imagebuilder*/
+*ImageBuilder*/
+dl/
+feeds/
+build_dir/
+staging_dir/
+bin/
+.config.old
+
+# Firmware & package artifacts / downloaded archives
+*.img
+*.img.gz
+*.img.xz
+*.itb
+*.ipk
+*.apk
+*.tar.gz
+*.tar.xz
+*.tar.zst
+*.zip
+*.manifest
+*.buildinfo
+sha256sums
+
+# Temporary & patch reject files
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
